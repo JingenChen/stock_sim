@@ -437,7 +437,10 @@ def cancel_all_orders(x_account_id: str = Header("default")):
         data = load_data(x_account_id)
         if not data: raise HTTPException(status_code=404)
         for order in data["active_orders"]:
-            if order["direction"] == "buy":
+            if order.get("frozen_amount", 0) > 0:
+                data["account"]["cash_frozen"] -= order["frozen_amount"]
+                data["account"]["cash_available"] += order["frozen_amount"]
+            elif order["direction"] == "buy": # 兼容旧版数据
                 cost = order["price"] * order["volume"] + max(5.0, order["price"] * order["volume"] * 0.00015)
                 data["account"]["cash_frozen"] -= cost; data["account"]["cash_available"] += cost
         data["active_orders"] = []; save_data(data, x_account_id)

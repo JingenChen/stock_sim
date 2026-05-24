@@ -258,17 +258,17 @@
                     </div>
                 </div>
 
-                <div class="card">
-                    <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #eee; padding-bottom: 10px; margin-bottom: 15px;">
-                        <h2 style="border:none; margin:0; padding:0;">收益率对比</h2>
-                        <div class="tabs" style="border:none; margin:0; font-size:12px;">
-                            <div class="tab" :class="{active: timeframe === 'all'}" @click="timeframe = 'all'">成立以来</div>
-                            <div class="tab" :class="{active: timeframe === '3m'}" @click="timeframe = '3m'">近3个月</div>
-                            <div class="tab" :class="{active: timeframe === '6m'}" @click="timeframe = '6m'">近半年</div>
-                            <div class="tab" :class="{active: timeframe === '1y'}" @click="timeframe = '1y'">近1年</div>
+                <div class="card" style="padding: 15px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                        <h2 style="border:none; margin:0; padding:0; font-size: 16px; white-space: nowrap;">收益率</h2>
+                        <div class="tabs" style="border:none; margin:0; gap: 5px;">
+                            <div class="tab" style="padding: 4px 8px; font-size: 12px;" :class="{active: timeframe === 'all'}" @click="timeframe = 'all'">全部</div>
+                            <div class="tab" style="padding: 4px 8px; font-size: 12px;" :class="{active: timeframe === '3m'}" @click="timeframe = '3m'">3M</div>
+                            <div class="tab" style="padding: 4px 8px; font-size: 12px;" :class="{active: timeframe === '6m'}" @click="timeframe = '6m'">6M</div>
+                            <div class="tab" style="padding: 4px 8px; font-size: 12px;" :class="{active: timeframe === '1y'}" @click="timeframe = '1y'">1Y</div>
                         </div>
                     </div>
-                    <div id="chart" style="width: 100%; height: 350px;"></div>
+                    <div id="chart" style="width: 100%; height: 320px;"></div>
                 </div>
             </div>
         </div>
