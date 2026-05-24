@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+data.json
+history.csv
+server.log
+archive/
+*.csv
+*.json
+!data.json.template # If I were to create one, but I won't for now

@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>A股虚拟交易系统</title>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f0f2f5; margin: 0; padding: 20px; }
+        .container { max-width: 1400px; margin: 0 auto; display: grid; grid-template-columns: 2.5fr 1fr; gap: 20px; }
+        .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        h2 { margin-top: 0; font-size: 18px; color: #333; border-bottom: 1px solid #eee; padding-bottom: 10px; }
+        .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-bottom: 20px; }
+        .stat-item { text-align: left; padding: 10px; background: #fafafa; border-radius: 4px; }
+        .stat-label { font-size: 12px; color: #888; margin-bottom: 5px; }
+        .stat-value { font-size: 18px; font-weight: bold; color: #333; }
+        .up { color: #cf1322 !important; }
+        .down { color: #389e0d !important; }
+        input, select, button { width: 100%; padding: 10px; margin-bottom: 10px; border: 1px solid #d9d9d9; border-radius: 4px; box-sizing: border-box; }
+        button { cursor: pointer; background: #1677ff; color: white; border: none; font-weight: bold; }
+        button.sell { background: #ff4d4f; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { text-align: left; padding: 12px; border-bottom: 1px solid #eee; font-size: 14px; }
+        th { background: #fafafa; color: #555; }
+        .rate { font-size: 12px; font-weight: normal; margin-left: 4px; }
+        .tabs { display: flex; gap: 20px; border-bottom: 1px solid #eee; margin-bottom: 15px; }
+        .tab { padding-bottom: 8px; cursor: pointer; color: #888; border-bottom: 2px solid transparent; }
+        .tab.active { color: #1677ff; border-bottom-color: #1677ff; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <div class="container">
+            <!-- 左侧核心区 -->
+            <div class="left-col">
+                <!-- 资产看板 -->
+                <div class="card">
+                    <h2>资产看板 <small v-if="!account.is_trading" style="color:#faad14; font-weight:normal; font-size:12px; margin-left:10px;">(非交易时段)</small></h2>
+                    <div class="stats-grid">
+                        <div class="stat-item">
+                            <div class="stat-label">总资产</div>
+                            <div class="stat-value">¥ {{ formatNum(account.total_asset) }}</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-label">当日盈亏</div>
+                            <div class="stat-value" :class="getPnlClass(account.daily_pnl)">
+                                {{ account.daily_pnl > 0 ? '+' : '' }}{{ formatNum(account.daily_pnl) }}
+                                <span class="rate">({{ account.daily_pnl_rate?.toFixed(2) }}%)</span>
+                            </div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-label">累计盈亏</div>
+                            <div class="stat-value" :class="getPnlClass(account.cumulative_pnl)">
+                                {{ account.cumulative_pnl > 0 ? '+' : '' }}{{ formatNum(account.cumulative_pnl) }}
+                                <span class="rate">({{ account.cumulative_pnl_rate?.toFixed(2) }}%)</span>
+                            </div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-label">持仓市值</div>
+                            <div class="stat-value">¥ {{ formatNum(account.market_value) }}</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-label">可用资金</div>
+                            <div class="stat-value">¥ {{ formatNum(account.cash_available) }}</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-label">冻结资金</div>
+                            <div class="stat-value">¥ {{ formatNum(account.cash_frozen) }}</div>
+                        </div>
+                    </div>
+                    <div style="display: flex; gap: 10px; align-items: center; background: #f5f5f5; padding: 10px; border-radius: 4px; flex-wrap: wrap;">
+                        <button @click="settleT1" style="width: auto; margin: 0; background: #52c41a">T+1 日终结算</button>
+                        <button @click="resetData" style="width: auto; margin: 0; background: #8c8c8c">重置系统</button>
+                        <button @click="exportData" style="width: auto; margin: 0; background: #1677ff">备份数据</button>
+                        <button @click="$refs.fileInput.click()" style="width: auto; margin: 0; background: #722ed1">导入备份</button>
+                        <input type="file" ref="fileInput" style="display: none" @change="importData" accept=".json">
+                        
+                        <div style="flex-basis: 100%; height: 0; margin: 0;"></div> <!-- 强制换行 -->
+                        
+                        <input v-model.number="cashAmount" type="number" style="width: 100px; margin: 0;">
+                        <button @click="handleCash('deposit')" style="width: auto; margin: 0;">入金</button>
+                        <button @click="handleCash('withdraw')" style="width: auto; margin: 0; background: #faad14">出金</button>
+                    </div>
+                </div>
+
+                <!-- 持仓列表 -->
+                <div class="card">
+                    <h2>我的持仓</h2>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>代码/名称</th>
+                                <th>持仓/可用</th>
+                                <th>成本/现价</th>
+                                <th>市值</th>
+                                <th>当日盈亏</th>
+                                <th>浮动盈亏</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="pos in positions" :key="pos.code">
+                                <td>{{ pos.name }}<br><small style="color: #999">{{ pos.code }}</small></td>
+                                <td>{{ pos.total_volume }}<br><small style="color: #999">{{ pos.available_volume }}</small></td>
+                                <td>{{ pos.cost_price.toFixed(2) }}<br><small :class="getPnlClass(pos.floating_pnl)">{{ pos.current_price?.toFixed(2) }}</small></td>
+                                <td>¥ {{ formatNum(pos.total_volume * pos.current_price) }}</td>
+                                <td :class="getPnlClass(pos.daily_pnl)">
+                                    {{ pos.daily_pnl > 0 ? '+' : '' }}{{ pos.daily_pnl?.toFixed(2) }}<br>
+                                    <small>{{ pos.daily_pnl_rate > 0 ? '+' : '' }}{{ pos.daily_pnl_rate?.toFixed(2) }}%</small>
+                                </td>
+                                <td :class="getPnlClass(pos.floating_pnl)">
+                                    {{ pos.floating_pnl > 0 ? '+' : '' }}{{ pos.floating_pnl?.toFixed(2) }}<br>
+                                    <small>{{ pos.floating_pnl_rate > 0 ? '+' : '' }}{{ pos.floating_pnl_rate?.toFixed(2) }}%</small>
+                                </td>
+                            </tr>
+                            <tr v-if="positions.length === 0"><td colspan="6" style="text-align:center; color:#999">暂无持仓</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- 底部：委托与成交 -->
+                <div class="card">
+                    <div class="tabs" style="justify-content: space-between; align-items: center;">
+                        <div style="display: flex; gap: 20px;">
+                            <div class="tab" :class="{active: activeTab === 'orders'}" @click="activeTab = 'orders'">当前委托 ({{ orders.length }})</div>
+                            <div class="tab" :class="{active: activeTab === 'history'}" @click="activeTab = 'history'">历史成交</div>
+                        </div>
+                        <button v-if="activeTab === 'orders' && orders.length > 0" @click="cancelAllOrders" style="width: auto; margin: 0; background: #ff4d4f; padding: 4px 12px; font-size: 12px;">一键撤单</button>
+                    </div>
+                    
+                    <!-- 当前委托 -->
+                    <table v-if="activeTab === 'orders'">
+                        <thead>
+                            <tr>
+                                <th>时间</th>
+                                <th>股票</th>
+                                <th>方向</th>
+                                <th>委托价</th>
+                                <th>数量</th>
+                                <th>条件/状态</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="order in orders" :key="order.order_id">
+                                <td>{{ formatTime(order.timestamp) }}</td>
+                                <td>{{ order.name }}<br><small style="color:#999">{{ order.code }}</small></td>
+                                <td :class="order.direction === 'buy' ? 'up' : 'down'">
+                                    {{ order.direction === 'buy' ? '买入' : (order.direction === 'stop_sell' ? '止损卖出' : '卖出') }}
+                                </td>
+                                <td>{{ order.price }}</td>
+                                <td>{{ order.volume }}</td>
+                                <td>
+                                    <span v-if="order.activation_time" style="color: #faad14; font-size: 12px;">
+                                        🕒 {{ order.activation_time }} 激活
+                                    </span>
+                                    <span v-else>待成交</span>
+                                </td>
+                            </tr>
+                            <tr v-if="orders.length === 0"><td colspan="6" style="text-align:center; color:#999">暂无挂单</td></tr>
+                        </tbody>
+                    </table>
+
+                    <!-- 历史成交 -->
+                    <table v-if="activeTab === 'history'">
+                        <thead>
+                            <tr>
+                                <th>时间</th>
+                                <th>股票</th>
+                                <th>方向</th>
+                                <th>成交价</th>
+                                <th>成交量</th>
+                                <th>手续费</th>
+                                <th>成交额</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="h in history" :key="h.timestamp + h.code">
+                                <td>{{ h.timestamp }}</td>
+                                <td>{{ h.name }}<br><small style="color:#999">{{ h.code }}</small></td>
+                                <td :class="h.direction === 'buy' ? 'up' : 'down'">{{ h.direction === 'buy' ? '买入' : '卖出' }}</td>
+                                <td>{{ parseFloat(h.price).toFixed(2) }}</td>
+                                <td>{{ h.volume }}</td>
+                                <td>{{ parseFloat(h.fee).toFixed(2) }}</td>
+                                <td>¥ {{ formatNum(parseFloat(h.amount)) }}</td>
+                            </tr>
+                            <tr v-if="history.length === 0"><td colspan="7" style="text-align:center; color:#999">暂无成交记录</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- 右侧面板 -->
+            <div class="right-col">
+                <div class="card">
+                    <h2>交易面板</h2>
+                    <input v-model="tradeForm.code" placeholder="股票代码" @blur="fetchQuote">
+                    <div v-if="quote" style="margin-bottom: 10px; padding: 10px; background: #fffbe6; border: 1px solid #ffe58f; border-radius:4px;">
+                        <strong>{{ quote.name }}</strong> | 现价: <span class="up">{{ quote.price }}</span><br>
+                        <small style="color:#888">昨收: {{ quote.prev_close }}</small>
+                    </div>
+                    <input v-model.number="tradeForm.price" type="number" step="0.01" placeholder="委托价格">
+                    <input v-model.number="tradeForm.volume" type="number" step="100" placeholder="委托数量">
+                    <div style="margin-bottom: 10px;">
+                        <label style="font-size: 12px; color: #888;">激活时间 (可选, 格式 HH:MM:SS):</label>
+                        <input v-model="tradeForm.activation_time" placeholder="例如: 14:50:00">
+                    </div>
+                    <div style="display: flex; gap: 10px;">
+                        <button @click="submitOrder('buy')">买入</button>
+                        <button @click="submitOrder('sell')" class="sell">卖出</button>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h2>行情图表</h2>
+                    <div id="chart" style="width: 100%; height: 300px; display:flex; align-items:center; justify-content:center; background:#fafafa; color:#999;">
+                        (K 线组件开发中)
+                    </div>
+                    <p style="font-size: 12px; color: #999; text-align: center; margin-top:10px;">实时数据由后端同步</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const { createApp, ref, onMounted } = Vue;
+        createApp({
+            setup() {
+                const account = ref({});
+                const positions = ref([]);
+                const orders = ref([]);
+                const history = ref([]);
+                const quote = ref(null);
+                const activeTab = ref('orders');
+                const cashAmount = ref(100000);
+                const tradeForm = ref({ code: '', price: 0, volume: 100, activation_time: '' });
+
+                const fetchData = async () => {
+                    try {
+                        const accRes = await axios.get('/api/account');
+                        account.value = accRes.data;
+                        const posRes = await axios.get('/api/positions');
+                        positions.value = posRes.data;
+                        const orderRes = await axios.get('/api/orders');
+                        orders.value = orderRes.data;
+                        const historyRes = await axios.get('/api/history');
+                        history.value = historyRes.data;
+                    } catch (e) { console.error(e); }
+                };
+
+                const fetchQuote = async () => {
+                    if (!tradeForm.value.code) return;
+                    try {
+                        const res = await axios.get(`/api/quote/${tradeForm.value.code}`);
+                        quote.value = res.data;
+                        if (tradeForm.value.price === 0) tradeForm.value.price = res.data.price;
+                    } catch (e) { alert('行情获取失败'); }
+                };
+
+                const submitOrder = async (direction) => {
+                    try {
+                        await axios.post('/api/order', { ...tradeForm.value, direction });
+                        alert('委托已提交');
+                        fetchData();
+                    } catch (e) { alert(e.response?.data?.detail || '提交失败'); }
+                };
+
+                const handleCash = async (action) => {
+                    try {
+                        await axios.post(`/api/${action}`, { amount: cashAmount.value });
+                        fetchData();
+                    } catch (e) { alert('操作失败'); }
+                };
+
+                const settleT1 = async () => {
+                    await axios.post('/api/settle');
+                    fetchData();
+                };
+
+                const resetData = async () => {
+                    if (confirm('警告：此操作将清空所有数据。确定吗？')) {
+                        await axios.post('/api/reset');
+                        fetchData();
+                    }
+                };
+
+                const exportData = async () => {
+                    try {
+                        const res = await axios.get('/api/system/export');
+                        const dataStr = JSON.stringify(res.data, null, 2);
+                        const blob = new Blob([dataStr], { type: 'application/json' });
+                        const url = URL.createObjectURL(blob);
+                        const link = document.createElement('a');
+                        link.href = url;
+                        link.download = `stock_sim_backup_${new Date().toISOString().split('T')[0]}.json`;
+                        link.click();
+                        URL.revokeObjectURL(url);
+                    } catch (e) { alert('导出失败'); }
+                };
+
+                const importData = async (event) => {
+                    const file = event.target.files[0];
+                    if (!file) return;
+                    const reader = new FileReader();
+                    reader.onload = async (e) => {
+                        try {
+                            const json = JSON.parse(e.target.result);
+                            await axios.post('/api/system/import', json);
+                            alert('导入成功');
+                            fetchData();
+                        } catch (err) { alert('导入失败：文件格式错误或数据无效'); }
+                    };
+                    reader.readAsText(file);
+                    event.target.value = ''; // 重置以允许重复选择同一文件
+                };
+
+                const cancelOrder = async (oid) => {
+                    await axios.post(`/api/order/cancel/${oid}`);
+                    fetchData();
+                };
+
+                const cancelAllOrders = async () => {
+                    if (confirm('确定要撤销所有挂起的委托吗？')) {
+                        await axios.post('/api/orders/cancel_all');
+                        fetchData();
+                    }
+                };
+
+                const formatNum = (n) => n?.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                const formatTime = (ts) => new Date(ts * 1000).toLocaleTimeString();
+                const getPnlClass = (n) => n > 0 ? 'up' : (n < 0 ? 'down' : '');
+
+                onMounted(() => {
+                    fetchData();
+                    setInterval(fetchData, 5000);
+                });
+
+                return { account, positions, orders, history, quote, activeTab, tradeForm, cashAmount, fetchQuote, submitOrder, handleCash, settleT1, resetData, exportData, importData, cancelOrder, cancelAllOrders, formatNum, formatTime, getPnlClass };
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>
