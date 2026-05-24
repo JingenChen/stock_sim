@@ -1,6 +1,7 @@
 import requests
 
 BASE_URL = "http://127.0.0.1:8000/api"
+ACCOUNT_ID = "default" # 修改此处以针对特定账户操作
 
 # 你的批量导入清单 (代码, 名称, 指定买入均价, 数量)
 # 100万资金平均分配，每只约6.67万，最小买入单位100股
@@ -36,7 +37,7 @@ def bulk_import():
         })
     
     try:
-        res = requests.post(f"{BASE_URL}/import_positions", json=payload)
+        res = requests.post(f"{BASE_URL}/import_positions", json=payload, headers={"X-Account-Id": ACCOUNT_ID})
         if res.status_code == 200:
             print("✨ 导入成功！所有股票已直接进入持仓列表。")
             print("💰 已自动扣除相应资金及佣金 (万1.5)。")

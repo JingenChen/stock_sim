@@ -4,8 +4,9 @@ import time
 import threading
 import requests
 import csv
+import shutil
 from datetime import datetime
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -20,8 +21,47 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DATA_FILE = "data.json"
-HISTORY_FILE = "history.csv"
+ACCOUNTS_DIR = "accounts"
+
+def get_account_dir(account_id: str):
+    return os.path.join(ACCOUNTS_DIR, account_id)
+
+def get_data_file(account_id: str):
+    return os.path.join(get_account_dir(account_id), "data.json")
+
+def get_history_file(account_id: str):
+    return os.path.join(get_account_dir(account_id), "history.csv")
+
+def get_metadata_file(account_id: str):
+    return os.path.join(get_account_dir(account_id), "metadata.json")
+
+def init_system():
+    if not os.path.exists(ACCOUNTS_DIR):
+        os.makedirs(ACCOUNTS_DIR)
+    
+    # 迁移逻辑：如果根目录下有 data.json，将其迁移到 accounts/default
+    old_data = "data.json"
+    old_history = "history.csv"
+    default_dir = get_account_dir("default")
+    
+    if os.path.exists(old_data) and not os.path.exists(default_dir):
+        os.makedirs(default_dir)
+        shutil.move(old_data, get_data_file("default"))
+        if os.path.exists(old_history):
+            shutil.move(old_history, get_history_file("default"))
+        with open(get_metadata_file("default"), "w") as f:
+            json.dump({"name": "默认账户"}, f)
+    
+    # 确保至少有一个默认账户
+    if not os.path.exists(default_dir):
+        os.makedirs(default_dir)
+        initial_data = {"account": {"initial_cash": 1000000.0, "cash_available": 1000000.0, "cash_frozen": 0.0}, "positions": {}, "active_orders": []}
+        with open(get_data_file("default"), "w") as f:
+            json.dump(initial_data, f, indent=2)
+        with open(get_metadata_file("default"), "w") as f:
+            json.dump({"name": "默认账户"}, f)
+
+init_system()
 
 def is_trading_time():
     now = datetime.now()
@@ -31,21 +71,25 @@ def is_trading_time():
     if "13:00:00" <= current_time <= "15:00:00": return True
     return False
 
-def load_data():
-    if not os.path.exists(DATA_FILE):
-        initial_data = {"account": {"initial_cash": 1000000.0, "cash_available": 1000000.0, "cash_frozen": 0.0}, "positions": {}, "active_orders": []}
-        save_data(initial_data); return initial_data
+def load_data(account_id: str):
+    file_path = get_data_file(account_id)
+    if not os.path.exists(file_path):
+        return None
     try:
-        with open(DATA_FILE, "r") as f: data = json.load(f)
-    except: return load_data()
+        with open(file_path, "r") as f: data = json.load(f)
+    except: return None
     return data
 
-def save_data(data):
-    with open(DATA_FILE, "w") as f: json.dump(data, f, indent=2)
+def save_data(data, account_id: str):
+    file_path = get_data_file(account_id)
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    with open(file_path, "w") as f: json.dump(data, f, indent=2)
 
-def log_history(record):
-    file_exists = os.path.isfile(HISTORY_FILE)
-    with open(HISTORY_FILE, "a", newline="") as f:
+def log_history(record, account_id: str):
+    file_path = get_history_file(account_id)
+    file_exists = os.path.isfile(file_path)
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    with open(file_path, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=["timestamp", "code", "name", "direction", "price", "volume", "fee", "amount"])
         if not file_exists: writer.writeheader()
         writer.writerow(record)
@@ -66,15 +110,14 @@ def get_stock_quote(code: str):
 
 file_lock = threading.Lock()
 
-def trigger_matching():
+def trigger_matching(account_id: str):
     if not is_trading_time(): return
     with file_lock:
         try:
-            data = load_data()
-            if not data["active_orders"]: return
+            data = load_data(account_id)
+            if not data or not data["active_orders"]: return
             changed = False; remaining = []
             for order in data["active_orders"]:
-                # 检查条件委托：激活时间
                 if order.get("activation_time"):
                     now_str = datetime.now().strftime("%H:%M:%S")
                     if now_str < order["activation_time"]:
@@ -85,7 +128,40 @@ def trigger_matching():
                 if quote and quote["price"] > 0:
                     curr_price = quote["price"]
                     executed = False
-                    if order["direction"] == "buy" and curr_price <= order["price"]:
+                    
+                    # 市价单逻辑
+                    if order["direction"] == "market_buy":
+                        amount = curr_price * order["volume"]
+                        fee = max(5.0, amount * 0.00015)
+                        total_cost = amount + fee
+                        
+                        # 释放冻结资金（下单时按现价+1%预冻结）
+                        frozen_orig = order.get("frozen_amount", 0)
+                        data["account"]["cash_frozen"] -= frozen_orig
+                        data["account"]["cash_available"] += (frozen_orig - total_cost)
+                        
+                        pos = data["positions"].get(order["code"], {"code": order["code"], "name": order["name"], "total_volume": 0, "available_volume": 0, "cost_price": 0.0, "today_bought_volume": 0, "today_bought_cost": 0.0})
+                        new_total = pos["total_volume"] + order["volume"]
+                        pos["cost_price"] = (pos["cost_price"] * pos["total_volume"] + total_cost) / new_total
+                        pos["total_volume"] = new_total; pos["today_bought_volume"] += order["volume"]; pos["today_bought_cost"] += total_cost
+                        data["positions"][order["code"]] = pos
+                        executed = True
+                    elif order["direction"] == "market_sell":
+                        pos = data["positions"].get(order["code"])
+                        if pos and pos["total_volume"] >= order["volume"]:
+                            amount = curr_price * order["volume"]
+                            fee = max(5.0, amount * 0.00015) + (amount * 0.0005)
+                            data["account"]["cash_available"] += (amount - fee)
+                            pos["total_volume"] -= order["volume"]
+                            pos["available_volume"] = max(0, pos["available_volume"] - order["volume"])
+                            if pos["total_volume"] <= 0: del data["positions"][order["code"]]
+                            executed = True
+                        else:
+                            # 持仓不足，撤单
+                            changed = True; continue
+                            
+                    # 限价单逻辑
+                    elif order["direction"] == "buy" and curr_price <= order["price"]:
                         amount = curr_price * order["volume"]
                         fee = max(5.0, amount * 0.00015)
                         total_cost = amount + fee
@@ -101,43 +177,92 @@ def trigger_matching():
                     elif order["direction"] in ["sell", "stop_sell"]:
                         if (order["direction"] == "sell" and curr_price >= order["price"]) or (order["direction"] == "stop_sell" and curr_price <= order["price"]):
                             pos = data["positions"].get(order["code"])
-                            # 只有在成交时才真正检查持仓是否足够（应对OCO模式）
                             if pos and pos["total_volume"] >= order["volume"]:
                                 amount = curr_price * order["volume"]
                                 fee = max(5.0, amount * 0.00015) + (amount * 0.0005)
                                 data["account"]["cash_available"] += (amount - fee)
                                 pos["total_volume"] -= order["volume"]
-                                # 同时也同步减少 available_volume
                                 pos["available_volume"] = max(0, pos["available_volume"] - order["volume"])
                                 if pos["total_volume"] <= 0: del data["positions"][order["code"]]
                                 executed = True
-                                
-                                # OCO 逻辑：如果成交了，检查是否需要清理该股票多余的卖单
-                                # 如果剩余持仓不足以支撑其他挂起的卖单，那些单子将在后续循环中因持仓不足被跳过或在此处处理
-                                log_history({"timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "code": order["code"], "name": order["name"], "direction": "sell", "price": curr_price, "volume": order["volume"], "fee": fee, "amount": amount})
-                                changed = True; continue
                             else:
-                                # 持仓不足，撤单处理
-                                print(f"Order cancelled due to insufficient shares: {order['code']}")
+                                # 持仓不足，撤单
                                 changed = True; continue
+                    
                     if executed:
-                        log_history({"timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "code": order["code"], "name": order["name"], "direction": "sell" if "sell" in order["direction"] else "buy", "price": curr_price, "volume": order["volume"], "fee": fee, "amount": amount})
+                        log_history({"timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "code": order["code"], "name": order["name"], "direction": "sell" if "sell" in order["direction"] else "buy", "price": curr_price, "volume": order["volume"], "fee": fee, "amount": amount}, account_id)
                         changed = True; continue
                 remaining.append(order)
-            if changed: data["active_orders"] = remaining; save_data(data)
-        except Exception as e: print(f"Matching error: {e}")
+            if changed: data["active_orders"] = remaining; save_data(data, account_id)
+        except Exception as e: print(f"Matching error ({account_id}): {e}")
 
 def background_matching_loop():
-    while True: trigger_matching(); time.sleep(3)
+    while True:
+        if os.path.exists(ACCOUNTS_DIR):
+            for aid in os.listdir(ACCOUNTS_DIR):
+                if os.path.isdir(get_account_dir(aid)):
+                    trigger_matching(aid)
+        time.sleep(3)
 
 threading.Thread(target=background_matching_loop, daemon=True).start()
+
+# --- Account Management APIs ---
+
+@app.get("/api/accounts")
+def list_accounts():
+    res = []
+    if os.path.exists(ACCOUNTS_DIR):
+        for aid in os.listdir(ACCOUNTS_DIR):
+            meta_path = get_metadata_file(aid)
+            if os.path.isfile(meta_path):
+                with open(meta_path, "r") as f:
+                    meta = json.load(f)
+                    res.append({"id": aid, "name": meta.get("name", aid)})
+    return res
+
+class AccountCreateRequest(BaseModel):
+    name: str
+
+@app.post("/api/accounts")
+def create_account(req: AccountCreateRequest):
+    aid = str(int(time.time()))
+    adir = get_account_dir(aid)
+    os.makedirs(adir)
+    initial_data = {"account": {"initial_cash": 1000000.0, "cash_available": 1000000.0, "cash_frozen": 0.0}, "positions": {}, "active_orders": []}
+    with open(get_data_file(aid), "w") as f:
+        json.dump(initial_data, f, indent=2)
+    with open(get_metadata_file(aid), "w") as f:
+        json.dump({"name": req.name}, f)
+    return {"id": aid, "name": req.name}
+
+@app.put("/api/accounts/{account_id}")
+def rename_account(account_id: str, req: AccountCreateRequest):
+    meta_path = get_metadata_file(account_id)
+    if not os.path.exists(meta_path):
+        raise HTTPException(status_code=404)
+    with open(meta_path, "w") as f:
+        json.dump({"name": req.name}, f)
+    return {"id": account_id, "name": req.name}
+
+@app.delete("/api/accounts/{account_id}")
+def delete_account(account_id: str):
+    if account_id == "default":
+        raise HTTPException(status_code=400, detail="Cannot delete default account")
+    adir = get_account_dir(account_id)
+    if os.path.exists(adir):
+        shutil.rmtree(adir)
+    return {"message": "ok"}
+
+# --- Core Trading APIs ---
 
 @app.get("/")
 def read_index(): return FileResponse("index.html")
 
 @app.get("/api/account")
-def get_account():
-    data = load_data(); acc = data["account"]; mv = 0.0; dpnl = 0.0
+def get_account(x_account_id: str = Header("default")):
+    data = load_data(x_account_id)
+    if not data: raise HTTPException(status_code=404)
+    acc = data["account"]; mv = 0.0; dpnl = 0.0
     for code, pos in data["positions"].items():
         q = get_stock_quote(code)
         if q:
@@ -149,8 +274,10 @@ def get_account():
     return {"cash_available": acc["cash_available"], "cash_frozen": acc["cash_frozen"], "market_value": mv, "total_asset": ta, "daily_pnl": dpnl, "daily_pnl_rate": (dpnl/(ta-dpnl)*100 if ta!=dpnl else 0), "cumulative_pnl": cpnl, "cumulative_pnl_rate": (cpnl/acc["initial_cash"]*100 if acc["initial_cash"]!=0 else 0), "is_trading": is_trading_time()}
 
 @app.get("/api/positions")
-def get_positions():
-    data = load_data(); res = []
+def get_positions(x_account_id: str = Header("default")):
+    data = load_data(x_account_id)
+    if not data: raise HTTPException(status_code=404)
+    res = []
     for code, pos in data["positions"].items():
         q = get_stock_quote(code)
         if q:
@@ -164,13 +291,16 @@ def get_positions():
     return res
 
 @app.get("/api/orders")
-def get_orders(): return load_data()["active_orders"]
+def get_orders(x_account_id: str = Header("default")):
+    data = load_data(x_account_id)
+    return data["active_orders"] if data else []
 
 @app.get("/api/history")
-def get_history():
-    if not os.path.exists(HISTORY_FILE): return []
+def get_history(x_account_id: str = Header("default")):
+    h_file = get_history_file(x_account_id)
+    if not os.path.exists(h_file): return []
     try:
-        with open(HISTORY_FILE, "r") as f:
+        with open(h_file, "r") as f:
             reader = csv.DictReader(f)
             return list(reader)[::-1]
     except: return []
@@ -185,69 +315,82 @@ class OrderRequest(BaseModel):
     code: str; price: float; volume: int; direction: str; activation_time: Optional[str] = None
 
 @app.post("/api/order")
-def create_order(order: OrderRequest):
+def create_order(order: OrderRequest, x_account_id: str = Header("default")):
     with file_lock:
-        data = load_data(); q = get_stock_quote(order.code)
+        data = load_data(x_account_id)
+        if not data: raise HTTPException(status_code=404)
+        q = get_stock_quote(order.code)
         if not q: raise HTTPException(status_code=404)
+        
+        frozen_amount = 0
         if order.direction == "buy":
-            cost = order.price * order.volume + max(5.0, order.price * order.volume * 0.00015)
-            if data["account"]["cash_available"] < cost: raise HTTPException(status_code=400, detail="Insufficient funds")
-            data["account"]["cash_available"] -= cost; data["account"]["cash_frozen"] += cost
-        elif order.direction in ["sell", "stop_sell"]:
+            frozen_amount = order.price * order.volume + max(5.0, order.price * order.volume * 0.00015)
+        elif order.direction == "market_buy":
+            # 市价买：按当前价 + 1% 溢价预冻结，防止滑点
+            curr_price = q["price"]
+            frozen_amount = (curr_price * 1.01) * order.volume + max(5.0, (curr_price * 1.01) * order.volume * 0.00015)
+        
+        if frozen_amount > 0:
+            if data["account"]["cash_available"] < frozen_amount: 
+                raise HTTPException(status_code=400, detail=f"Insufficient funds. Need {frozen_amount:.2f}")
+            data["account"]["cash_available"] -= frozen_amount; data["account"]["cash_frozen"] += frozen_amount
+
+        if order.direction in ["sell", "stop_sell", "market_sell"]:
             pos = data["positions"].get(order.code)
-            # OCO 支持：下单时不扣除 available_volume，只检查总持仓是否足够
             if not pos or pos["total_volume"] < order.volume: 
                 raise HTTPException(status_code=400, detail="Insufficient total shares")
-            # 不再执行 data["positions"][order.code]["available_volume"] -= order.volume
+        
         new_order = {
             "order_id": str(int(time.time() * 1000)), 
             "timestamp": int(time.time()), 
             "code": order.code, 
             "name": q["name"], 
             "direction": order.direction, 
-            "price": order.price, 
+            "price": order.price if "market" not in order.direction else q["price"], 
             "volume": order.volume, 
             "status": "pending",
-            "activation_time": order.activation_time
+            "activation_time": order.activation_time,
+            "frozen_amount": frozen_amount
         }
-        data["active_orders"].append(new_order); save_data(data); return new_order
+        data["active_orders"].append(new_order); save_data(data, x_account_id); return new_order
 
 @app.post("/api/order/cancel/{order_id}")
-def cancel_order(order_id: str):
+def cancel_order(order_id: str, x_account_id: str = Header("default")):
     with file_lock:
-        data = load_data()
+        data = load_data(x_account_id)
+        if not data: raise HTTPException(status_code=404)
         order_to_cancel = None; remaining = []
         for o in data["active_orders"]:
             if o["order_id"] == order_id: order_to_cancel = o
             else: remaining.append(o)
         if not order_to_cancel: raise HTTPException(status_code=404, detail="Order not found")
-        if order_to_cancel["direction"] == "buy":
+        
+        if order_to_cancel.get("frozen_amount", 0) > 0:
+            data["account"]["cash_frozen"] -= order_to_cancel["frozen_amount"]
+            data["account"]["cash_available"] += order_to_cancel["frozen_amount"]
+        elif order_to_cancel["direction"] == "buy": # 兼容旧版数据
             cost = order_to_cancel["price"] * order_to_cancel["volume"] + max(5.0, order_to_cancel["price"] * order_to_cancel["volume"] * 0.00015)
             data["account"]["cash_frozen"] -= cost; data["account"]["cash_available"] += cost
-        elif order_to_cancel["direction"] in ["sell", "stop_sell"]:
-            if order_to_cancel["code"] in data["positions"]:
-                data["positions"][order_to_cancel["code"]]["available_volume"] += order_to_cancel["volume"]
-        data["active_orders"] = remaining; save_data(data); return {"message": "ok"}
+            
+        data["active_orders"] = remaining; save_data(data, x_account_id); return {"message": "ok"}
 
 @app.post("/api/orders/cancel_all")
-def cancel_all_orders():
+def cancel_all_orders(x_account_id: str = Header("default")):
     with file_lock:
-        data = load_data()
+        data = load_data(x_account_id)
+        if not data: raise HTTPException(status_code=404)
         for order in data["active_orders"]:
             if order["direction"] == "buy":
                 cost = order["price"] * order["volume"] + max(5.0, order["price"] * order["volume"] * 0.00015)
                 data["account"]["cash_frozen"] -= cost; data["account"]["cash_available"] += cost
-            elif order["direction"] in ["sell", "stop_sell"]:
-                if order["code"] in data["positions"]:
-                    data["positions"][order["code"]]["available_volume"] += order["volume"]
-        data["active_orders"] = []; save_data(data)
+        data["active_orders"] = []; save_data(data, x_account_id)
         return {"message": "All orders cancelled"}
 
-
 @app.post("/api/import_positions")
-def import_positions(items: List[OrderRequest]):
+def import_positions(items: List[OrderRequest], x_account_id: str = Header("default")):
     with file_lock:
-        data = load_data()
+        data = load_data(x_account_id)
+        if not data: raise HTTPException(status_code=404)
         for item in items:
             q = get_stock_quote(item.code)
             name = q["name"] if q else "未知股票"
@@ -259,48 +402,52 @@ def import_positions(items: List[OrderRequest]):
             pos["cost_price"] = (pos["cost_price"] * pos["total_volume"] + total_cost) / new_total
             pos["total_volume"] = new_total; pos["available_volume"] = new_total
             data["positions"][item.code] = pos
-            log_history({"timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "code": item.code, "name": name, "direction": "buy", "price": item.price, "volume": item.volume, "fee": fee, "amount": amount})
-        save_data(data); return {"message": "Import completed"}
+            log_history({"timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "code": item.code, "name": name, "direction": "buy", "price": item.price, "volume": item.volume, "fee": fee, "amount": amount}, x_account_id)
+        save_data(data, x_account_id); return {"message": "Import completed"}
 
 @app.post("/api/settle")
-def settle_t1():
+def settle_t1(x_account_id: str = Header("default")):
     with file_lock:
-        data = load_data()
+        data = load_data(x_account_id)
+        if not data: raise HTTPException(status_code=404)
         for c in data["positions"]: 
             pos = data["positions"][c]; pos["available_volume"] = pos["total_volume"]; pos["today_bought_volume"] = 0; pos["today_bought_cost"] = 0.0
-        save_data(data); return {"message": "ok"}
+        save_data(data, x_account_id); return {"message": "ok"}
 
 class CashRequest(BaseModel): amount: float
 @app.post("/api/deposit")
-def deposit(req: CashRequest):
+def deposit(req: CashRequest, x_account_id: str = Header("default")):
     with file_lock:
-        data = load_data(); data["account"]["cash_available"] += req.amount; data["account"]["initial_cash"] += req.amount
-        save_data(data); return data["account"]
+        data = load_data(x_account_id)
+        if not data: raise HTTPException(status_code=404)
+        data["account"]["cash_available"] += req.amount; data["account"]["initial_cash"] += req.amount
+        save_data(data, x_account_id); return data["account"]
 
 @app.post("/api/withdraw")
-def withdraw(req: CashRequest):
+def withdraw(req: CashRequest, x_account_id: str = Header("default")):
     with file_lock:
-        data = load_data()
-        if data["account"]["cash_available"] < req.amount: raise HTTPException(status_code=400)
+        data = load_data(x_account_id)
+        if not data or data["account"]["cash_available"] < req.amount: raise HTTPException(status_code=400)
         data["account"]["cash_available"] -= req.amount; data["account"]["initial_cash"] -= req.amount
-        save_data(data); return data["account"]
+        save_data(data, x_account_id); return data["account"]
 
 @app.post("/api/reset")
-def reset_data():
+def reset_data(x_account_id: str = Header("default")):
     with file_lock:
         initial_data = {"account": {"initial_cash": 1000000.0, "cash_available": 1000000.0, "cash_frozen": 0.0}, "positions": {}, "active_orders": []}
-        save_data(initial_data)
-        if os.path.exists(HISTORY_FILE): os.remove(HISTORY_FILE)
+        save_data(initial_data, x_account_id)
+        h_file = get_history_file(x_account_id)
+        if os.path.exists(h_file): os.remove(h_file)
         return {"message": "ok"}
 
 @app.get("/api/system/export")
-def export_system_data():
-    """导出系统所有数据 (data.json + history.csv)"""
+def export_system_data(x_account_id: str = Header("default")):
     with file_lock:
-        data = load_data()
+        data = load_data(x_account_id)
         history = []
-        if os.path.exists(HISTORY_FILE):
-            with open(HISTORY_FILE, "r") as f:
+        h_file = get_history_file(x_account_id)
+        if os.path.exists(h_file):
+            with open(h_file, "r") as f:
                 history = list(csv.DictReader(f))
         return {"data": data, "history": history}
 
@@ -309,20 +456,18 @@ class ImportRequest(BaseModel):
     history: List[dict]
 
 @app.post("/api/system/import")
-def import_system_data(req: ImportRequest):
-    """恢复系统数据"""
+def import_system_data(req: ImportRequest, x_account_id: str = Header("default")):
     with file_lock:
-        # 保存 data.json
-        save_data(req.data)
-        # 恢复 history.csv
+        save_data(req.data, x_account_id)
+        h_file = get_history_file(x_account_id)
         if req.history:
-            with open(HISTORY_FILE, "w", newline="") as f:
+            with open(h_file, "w", newline="") as f:
                 if len(req.history) > 0:
                     writer = csv.DictWriter(f, fieldnames=req.history[0].keys())
                     writer.writeheader()
                     writer.writerows(req.history)
-        elif os.path.exists(HISTORY_FILE):
-            os.remove(HISTORY_FILE)
+        elif os.path.exists(h_file):
+            os.remove(h_file)
         return {"message": "System data imported successfully"}
 
 if __name__ == "__main__":

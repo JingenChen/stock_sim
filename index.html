@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>A股虚拟交易系统</title>
+    <title>A股虚拟交易系统 - 多账户版</title>
     <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
@@ -21,23 +21,67 @@
         input, select, button { width: 100%; padding: 10px; margin-bottom: 10px; border: 1px solid #d9d9d9; border-radius: 4px; box-sizing: border-box; }
         button { cursor: pointer; background: #1677ff; color: white; border: none; font-weight: bold; }
         button.sell { background: #ff4d4f; }
+        button.ghost { background: transparent; color: #1677ff; border: 1px solid #1677ff; }
+        button.danger { background: #ff4d4f; }
         table { width: 100%; border-collapse: collapse; }
         th, td { text-align: left; padding: 12px; border-bottom: 1px solid #eee; font-size: 14px; }
         th { background: #fafafa; color: #555; }
         .rate { font-size: 12px; font-weight: normal; margin-left: 4px; }
         .tabs { display: flex; gap: 20px; border-bottom: 1px solid #eee; margin-bottom: 15px; }
-        .tab { padding-bottom: 8px; cursor: pointer; color: #888; border-bottom: 2px solid transparent; }
+        .tab { padding: 8px 12px; cursor: pointer; color: #888; border-bottom: 2px solid transparent; }
         .tab.active { color: #1677ff; border-bottom-color: #1677ff; font-weight: bold; }
+        
+        /* 账户选择器样式 */
+        .account-tabs { display: flex; align-items: center; gap: 10px; margin-bottom: 15px; overflow-x: auto; padding-bottom: 5px; }
+        .account-tab { padding: 6px 16px; background: #e6f4ff; color: #1677ff; border-radius: 20px; cursor: pointer; font-size: 14px; white-space: nowrap; border: 1px solid transparent; }
+        .account-tab.active { background: #1677ff; color: white; }
+        .add-account-btn { padding: 4px 10px; background: #f0f0f0; color: #666; border-radius: 50%; cursor: pointer; border: none; display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; }
+        
+        .modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+        .modal { background: white; padding: 20px; border-radius: 8px; width: 400px; }
     </style>
 </head>
 <body>
     <div id="app">
+        <!-- 账户管理模态框 -->
+        <div v-if="showAccountModal" class="modal-overlay" @click.self="showAccountModal = false">
+            <div class="modal">
+                <h3>{{ editAccount ? '重命名账户' : '新增账户' }}</h3>
+                <input v-model="newAccountName" placeholder="账户名称" @keyup.enter="saveAccount">
+                <div style="display: flex; gap: 10px;">
+                    <button @click="saveAccount">确定</button>
+                    <button @click="showAccountModal = false" class="ghost">取消</button>
+                </div>
+            </div>
+        </div>
+
         <div class="container">
             <!-- 左侧核心区 -->
             <div class="left-col">
+                <!-- 账户切换页签 -->
+                <div class="account-tabs">
+                    <div 
+                        v-for="acc in accounts" 
+                        :key="acc.id" 
+                        class="account-tab" 
+                        :class="{active: currentAccountId === acc.id}"
+                        @click="switchAccount(acc.id)"
+                    >
+                        {{ acc.name }}
+                    </div>
+                    <button class="add-account-btn" @click="openAccountModal()">+</button>
+                    <div style="flex-grow: 1;"></div>
+                    <div v-if="currentAccountId !== 'default'" style="display: flex; gap: 5px;">
+                        <small style="color: #999; cursor: pointer;" @click="openAccountModal(currentAccount)">重命名</small>
+                        <small style="color: #ff4d4f; cursor: pointer;" @click="deleteAccount(currentAccountId)">删除</small>
+                    </div>
+                </div>
+
                 <!-- 资产看板 -->
                 <div class="card">
-                    <h2>资产看板 <small v-if="!account.is_trading" style="color:#faad14; font-weight:normal; font-size:12px; margin-left:10px;">(非交易时段)</small></h2>
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <h2>资产看板 ({{ currentAccount?.name }}) <small v-if="!account.is_trading" style="color:#faad14; font-weight:normal; font-size:12px; margin-left:10px;">(非交易时段)</small></h2>
+                    </div>
                     <div class="stats-grid">
                         <div class="stat-item">
                             <div class="stat-label">总资产</div>
@@ -72,12 +116,12 @@
                     </div>
                     <div style="display: flex; gap: 10px; align-items: center; background: #f5f5f5; padding: 10px; border-radius: 4px; flex-wrap: wrap;">
                         <button @click="settleT1" style="width: auto; margin: 0; background: #52c41a">T+1 日终结算</button>
-                        <button @click="resetData" style="width: auto; margin: 0; background: #8c8c8c">重置系统</button>
-                        <button @click="exportData" style="width: auto; margin: 0; background: #1677ff">备份数据</button>
-                        <button @click="$refs.fileInput.click()" style="width: auto; margin: 0; background: #722ed1">导入备份</button>
+                        <button @click="resetData" style="width: auto; margin: 0; background: #8c8c8c">重置当前账户</button>
+                        <button @click="exportData" style="width: auto; margin: 0; background: #1677ff">备份</button>
+                        <button @click="$refs.fileInput.click()" style="width: auto; margin: 0; background: #722ed1">导入</button>
                         <input type="file" ref="fileInput" style="display: none" @change="importData" accept=".json">
                         
-                        <div style="flex-basis: 100%; height: 0; margin: 0;"></div> <!-- 强制换行 -->
+                        <div style="flex-basis: 100%; height: 0; margin: 0;"></div> 
                         
                         <input v-model.number="cashAmount" type="number" style="width: 100px; margin: 0;">
                         <button @click="handleCash('deposit')" style="width: auto; margin: 0;">入金</button>
@@ -129,7 +173,6 @@
                         <button v-if="activeTab === 'orders' && orders.length > 0" @click="cancelAllOrders" style="width: auto; margin: 0; background: #ff4d4f; padding: 4px 12px; font-size: 12px;">一键撤单</button>
                     </div>
                     
-                    <!-- 当前委托 -->
                     <table v-if="activeTab === 'orders'">
                         <thead>
                             <tr>
@@ -138,15 +181,16 @@
                                 <th>方向</th>
                                 <th>委托价</th>
                                 <th>数量</th>
-                                <th>条件/状态</th>
+                                <th>状态/操作</th>
                             </tr>
                         </thead>
                         <tbody>
                             <tr v-for="order in orders" :key="order.order_id">
                                 <td>{{ formatTime(order.timestamp) }}</td>
                                 <td>{{ order.name }}<br><small style="color:#999">{{ order.code }}</small></td>
-                                <td :class="order.direction === 'buy' ? 'up' : 'down'">
-                                    {{ order.direction === 'buy' ? '买入' : (order.direction === 'stop_sell' ? '止损卖出' : '卖出') }}
+                                <td :class="order.direction.includes('buy') ? 'up' : 'down'">
+                                    {{ order.direction.includes('buy') ? '买入' : (order.direction === 'stop_sell' ? '止损卖出' : '卖出') }}
+                                    <span v-if="order.direction.includes('market')" style="font-size: 10px; opacity: 0.7;">(市价)</span>
                                 </td>
                                 <td>{{ order.price }}</td>
                                 <td>{{ order.volume }}</td>
@@ -154,14 +198,13 @@
                                     <span v-if="order.activation_time" style="color: #faad14; font-size: 12px;">
                                         🕒 {{ order.activation_time }} 激活
                                     </span>
-                                    <span v-else>待成交</span>
+                                    <button @click="cancelOrder(order.order_id)" style="width: auto; padding: 2px 8px; margin: 0; background: #8c8c8c; font-size: 12px;">撤单</button>
                                 </td>
                             </tr>
                             <tr v-if="orders.length === 0"><td colspan="6" style="text-align:center; color:#999">暂无挂单</td></tr>
                         </tbody>
                     </table>
 
-                    <!-- 历史成交 -->
                     <table v-if="activeTab === 'history'">
                         <thead>
                             <tr>
@@ -205,9 +248,13 @@
                         <label style="font-size: 12px; color: #888;">激活时间 (可选, 格式 HH:MM:SS):</label>
                         <input v-model="tradeForm.activation_time" placeholder="例如: 14:50:00">
                     </div>
+                    <div style="display: flex; gap: 10px; margin-bottom: 10px;">
+                        <button @click="submitOrder('buy')">限价买入</button>
+                        <button @click="submitOrder('sell')" class="sell">限价卖出</button>
+                    </div>
                     <div style="display: flex; gap: 10px;">
-                        <button @click="submitOrder('buy')">买入</button>
-                        <button @click="submitOrder('sell')" class="sell">卖出</button>
+                        <button @click="submitOrder('market_buy')" class="ghost" style="border-color: #cf1322; color: #cf1322;">市价买入</button>
+                        <button @click="submitOrder('market_sell')" class="ghost" style="border-color: #389e0d; color: #389e0d;">市价卖出</button>
                     </div>
                 </div>
 
@@ -216,16 +263,22 @@
                     <div id="chart" style="width: 100%; height: 300px; display:flex; align-items:center; justify-content:center; background:#fafafa; color:#999;">
                         (K 线组件开发中)
                     </div>
-                    <p style="font-size: 12px; color: #999; text-align: center; margin-top:10px;">实时数据由后端同步</p>
                 </div>
             </div>
         </div>
     </div>
 
     <script>
-        const { createApp, ref, onMounted } = Vue;
+        const { createApp, ref, computed, onMounted, watch } = Vue;
+        
         createApp({
             setup() {
+                const accounts = ref([]);
+                const currentAccountId = ref(localStorage.getItem('lastAccountId') || 'default');
+                const showAccountModal = ref(false);
+                const editAccount = ref(null);
+                const newAccountName = ref('');
+                
                 const account = ref({});
                 const positions = ref([]);
                 const orders = ref([]);
@@ -235,15 +288,67 @@
                 const cashAmount = ref(100000);
                 const tradeForm = ref({ code: '', price: 0, volume: 100, activation_time: '' });
 
+                const currentAccount = computed(() => accounts.value.find(a => a.id === currentAccountId.value));
+
+                // 设置 Axios 拦截器，自动注入当前账户 ID
+                axios.interceptors.request.use(config => {
+                    config.headers['X-Account-Id'] = currentAccountId.value;
+                    return config;
+                });
+
+                const fetchAccounts = async () => {
+                    const res = await axios.get('/api/accounts');
+                    accounts.value = res.data;
+                    // 如果当前账户不存在，切换回默认
+                    if (!res.data.find(a => a.id === currentAccountId.value)) {
+                        currentAccountId.value = 'default';
+                    }
+                };
+
+                const switchAccount = (id) => {
+                    currentAccountId.value = id;
+                    localStorage.setItem('lastAccountId', id);
+                    fetchData();
+                };
+
+                const openAccountModal = (acc = null) => {
+                    editAccount.value = acc;
+                    newAccountName.value = acc ? acc.name : '';
+                    showAccountModal.value = true;
+                };
+
+                const saveAccount = async () => {
+                    if (!newAccountName.value) return;
+                    if (editAccount.value) {
+                        await axios.put(`/api/accounts/${editAccount.value.id}`, { name: newAccountName.value });
+                    } else {
+                        const res = await axios.post('/api/accounts', { name: newAccountName.value });
+                        currentAccountId.value = res.data.id;
+                    }
+                    showAccountModal.value = false;
+                    await fetchAccounts();
+                    fetchData();
+                };
+
+                const deleteAccount = async (id) => {
+                    if (confirm('确定要删除该账户及其所有数据吗？此操作不可逆！')) {
+                        await axios.delete(`/api/accounts/${id}`);
+                        switchAccount('default');
+                        await fetchAccounts();
+                    }
+                };
+
                 const fetchData = async () => {
                     try {
-                        const accRes = await axios.get('/api/account');
+                        const [accRes, posRes, orderRes, historyRes] = await Promise.all([
+                            axios.get('/api/account'),
+                            axios.get('/api/positions'),
+                            axios.get('/api/orders'),
+                            axios.get('/api/history')
+                        ]);
                         account.value = accRes.data;
-                        const posRes = await axios.get('/api/positions');
                         positions.value = posRes.data;
-                        const orderRes = await axios.get('/api/orders');
                         orders.value = orderRes.data;
-                        const historyRes = await axios.get('/api/history');
                         history.value = historyRes.data;
                     } catch (e) { console.error(e); }
                 };
@@ -278,7 +383,7 @@
                 };
 
                 const resetData = async () => {
-                    if (confirm('警告：此操作将清空所有数据。确定吗？')) {
+                    if (confirm('警告：此操作将清空当前账户的所有数据。确定吗？')) {
                         await axios.post('/api/reset');
                         fetchData();
                     }
@@ -292,7 +397,7 @@
                         const url = URL.createObjectURL(blob);
                         const link = document.createElement('a');
                         link.href = url;
-                        link.download = `stock_sim_backup_${new Date().toISOString().split('T')[0]}.json`;
+                        link.download = `backup_${currentAccount.value.name}_${new Date().toISOString().split('T')[0]}.json`;
                         link.click();
                         URL.revokeObjectURL(url);
                     } catch (e) { alert('导出失败'); }
@@ -311,7 +416,7 @@
                         } catch (err) { alert('导入失败：文件格式错误或数据无效'); }
                     };
                     reader.readAsText(file);
-                    event.target.value = ''; // 重置以允许重复选择同一文件
+                    event.target.value = '';
                 };
 
                 const cancelOrder = async (oid) => {
@@ -320,7 +425,7 @@
                 };
 
                 const cancelAllOrders = async () => {
-                    if (confirm('确定要撤销所有挂起的委托吗？')) {
+                    if (confirm('确定要撤销当前账户的所有挂起委托吗？')) {
                         await axios.post('/api/orders/cancel_all');
                         fetchData();
                     }
@@ -330,12 +435,18 @@
                 const formatTime = (ts) => new Date(ts * 1000).toLocaleTimeString();
                 const getPnlClass = (n) => n > 0 ? 'up' : (n < 0 ? 'down' : '');
 
-                onMounted(() => {
+                onMounted(async () => {
+                    await fetchAccounts();
                     fetchData();
                     setInterval(fetchData, 5000);
                 });
 
-                return { account, positions, orders, history, quote, activeTab, tradeForm, cashAmount, fetchQuote, submitOrder, handleCash, settleT1, resetData, exportData, importData, cancelOrder, cancelAllOrders, formatNum, formatTime, getPnlClass };
+                return { 
+                    accounts, currentAccountId, currentAccount, showAccountModal, editAccount, newAccountName,
+                    account, positions, orders, history, quote, activeTab, tradeForm, cashAmount, 
+                    switchAccount, openAccountModal, saveAccount, deleteAccount,
+                    fetchQuote, submitOrder, handleCash, settleT1, resetData, exportData, importData, cancelOrder, cancelAllOrders, formatNum, formatTime, getPnlClass 
+                };
             }
         }).mount('#app');
     </script>
