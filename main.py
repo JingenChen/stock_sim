@@ -35,6 +35,18 @@ def get_history_file(account_id: str):
 def get_metadata_file(account_id: str):
     return os.path.join(get_account_dir(account_id), "metadata.json")
 
+def get_asset_history_file(account_id: str):
+    return os.path.join(get_account_dir(account_id), "asset_history.csv")
+
+def calculate_total_asset(data):
+    acc = data["account"]
+    mv = 0.0
+    for code, pos in data["positions"].items():
+        q = get_stock_quote(code)
+        if q:
+            mv += q["price"] * pos["total_volume"]
+    return acc["cash_available"] + acc["cash_frozen"] + mv
+
 def init_system():
     if not os.path.exists(ACCOUNTS_DIR):
         os.makedirs(ACCOUNTS_DIR)
@@ -60,6 +72,18 @@ def init_system():
             json.dump(initial_data, f, indent=2)
         with open(get_metadata_file("default"), "w") as f:
             json.dump({"name": "默认账户"}, f)
+
+def log_asset_snapshot(account_id: str):
+    data = load_data(account_id)
+    if not data: return
+    ta = calculate_total_asset(data)
+    file_path = get_asset_history_file(account_id)
+    file_exists = os.path.isfile(file_path)
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    with open(file_path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["date", "total_asset"])
+        if not file_exists: writer.writeheader()
+        writer.writerow({"date": datetime.now().strftime("%Y-%m-%d"), "total_asset": ta})
 
 init_system()
 
@@ -305,6 +329,39 @@ def get_history(x_account_id: str = Header("default")):
             return list(reader)[::-1]
     except: return []
 
+@app.get("/api/asset_history")
+def get_asset_history(x_account_id: str = Header("default")):
+    file_path = get_asset_history_file(x_account_id)
+    history = []
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, "r") as f:
+                history = list(csv.DictReader(f))
+        except: pass
+    
+    # 追加实时当点数据，使图表包含今日涨跌
+    data = load_data(x_account_id)
+    if data:
+        ta = calculate_total_asset(data)
+        today = datetime.now().strftime("%Y-%m-%d")
+        if not history or history[-1]["date"] != today:
+            history.append({"date": today, "total_asset": ta})
+        else:
+            history[-1]["total_asset"] = ta # 更新今日最新值
+            
+    return history
+
+@app.get("/api/benchmark/{symbol}")
+def get_benchmark_history(symbol: str, days: int = 250):
+    url = f"http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData?symbol={symbol}&scale=240&ma=no&datalen={days}"
+    try:
+        res = requests.get(url, timeout=5)
+        data = res.json()
+        return [{"date": item["day"].split(" ")[0], "close": float(item["close"])} for item in data]
+    except Exception as e:
+        print(f"Benchmark fetch error: {e}")
+        return []
+
 @app.get("/api/quote/{code}")
 def get_quote(code: str):
     q = get_stock_quote(code)
@@ -410,6 +467,10 @@ def settle_t1(x_account_id: str = Header("default")):
     with file_lock:
         data = load_data(x_account_id)
         if not data: raise HTTPException(status_code=404)
+        
+        # 记录日终资产快照
+        log_asset_snapshot(x_account_id)
+        
         for c in data["positions"]: 
             pos = data["positions"][c]; pos["available_volume"] = pos["total_volume"]; pos["today_bought_volume"] = 0; pos["today_bought_cost"] = 0.0
         save_data(data, x_account_id); return {"message": "ok"}

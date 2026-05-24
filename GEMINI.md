@@ -14,6 +14,10 @@ This project is a minimalist **A-Share Virtual Trading System** designed for loc
   - `accounts/{account_id}/history.csv`: Account-specific trade history.
   - `accounts/{account_id}/metadata.json`: Account-specific metadata (e.g., display name).
 - **Core Engine**: A background thread in `main.py` iterates through all accounts in the `accounts/` directory every 3 seconds to match pending orders.
+- **Performance Chart**:
+  - **Account Performance**: Automatically tracked and saved during T+1 settlement.
+  - **Benchmarks**: CSI300 (`sh000300`) and CSI500 (`sh000905`) data retrieved via Sina Finance API.
+  - **Comparison**: Displays normalized yield curves (starting at 0% for the selected timeframe).
 
 ## Building and Running
 
