@@ -119,8 +119,12 @@ def log_history(record, account_id: str):
         writer.writerow(record)
 
 def get_stock_quote(code: str):
-    prefix = "sh" if code.startswith("6") else "sz"
-    url = f"http://hq.sinajs.cn/list={prefix}{code}"
+    if code.startswith(("sh", "sz", "bj")):
+        full_code = code
+    else:
+        prefix = "sh" if code.startswith("6") else "sz"
+        full_code = f"{prefix}{code}"
+    url = f"http://hq.sinajs.cn/list={full_code}"
     headers = {"Referer": "http://finance.sina.com.cn"}
     try:
         response = requests.get(url, headers=headers, timeout=5)
@@ -131,6 +135,33 @@ def get_stock_quote(code: str):
         if len(parts) < 32: return None
         return {"name": parts[0], "prev_close": float(parts[2]), "price": float(parts[3])}
     except: return None
+
+@app.get("/api/indices")
+def get_indices():
+    # s_sh000001 (上证), s_sz399001 (深证), s_sz399006 (创业板), s_sh000300 (沪深300), s_sh000905 (中证500), s_sh000852 (中证1000), s_sh000688 (科创50)
+    codes = "s_sh000001,s_sz399001,s_sz399006,s_sh000300,s_sh000905,s_sh000852,s_sh000688"
+    url = f"http://hq.sinajs.cn/list={codes}"
+    headers = {"Referer": "http://finance.sina.com.cn"}
+    indices = []
+    try:
+        response = requests.get(url, headers=headers, timeout=5)
+        lines = response.text.strip().split("\n")
+        for line in lines:
+            if '"' not in line: continue
+            data_str = line.split('"')[1]
+            parts = data_str.split(',')
+            if len(parts) >= 4:
+                # API format: Name, Price, Change Amount, Change Percentage, Volume, Amount
+                indices.append({
+                    "name": parts[0],
+                    "price": float(parts[1]),
+                    "change_amount": float(parts[2]),
+                    "change_rate": float(parts[3])
+                })
+        return indices
+    except Exception as e:
+        print(f"Indices fetch error: {e}")
+        return []
 
 file_lock = threading.Lock()
 

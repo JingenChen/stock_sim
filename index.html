@@ -39,6 +39,11 @@
         
         .modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
         .modal { background: white; padding: 20px; border-radius: 8px; width: 400px; }
+        .indices-bar { display: flex; gap: 15px; margin: 0 auto 20px auto; max-width: 1400px; flex-wrap: wrap; background: white; padding: 12px 20px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); align-items: center; justify-content: space-between; }
+        .index-item { display: flex; flex-direction: column; align-items: center; min-width: 100px; }
+        .index-name { font-size: 13px; color: #555; font-weight: bold; margin-bottom: 4px; }
+        .index-data { font-size: 15px; font-weight: bold; display: flex; gap: 8px; align-items: baseline; }
+        .index-rate { font-size: 12px; }
     </style>
 </head>
 <body>
@@ -51,6 +56,17 @@
                 <div style="display: flex; gap: 10px;">
                     <button @click="saveAccount">确定</button>
                     <button @click="showAccountModal = false" class="ghost">取消</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 顶部指数行情栏 -->
+        <div class="indices-bar" v-if="indices.length > 0">
+            <div v-for="idx in indices" :key="idx.name" class="index-item">
+                <div class="index-name">{{ idx.name }}</div>
+                <div class="index-data" :class="getPnlClass(idx.change_rate)">
+                    <span>{{ idx.price.toFixed(2) }}</span>
+                    <span class="index-rate">{{ idx.change_rate > 0 ? '+' : '' }}{{ idx.change_rate.toFixed(2) }}%</span>
                 </div>
             </div>
         </div>
@@ -284,9 +300,9 @@
                 const showAccountModal = ref(false);
                 const editAccount = ref(null);
                 const newAccountName = ref('');
-                
-                const account = ref({});
-                const positions = ref([]);
+
+                const indices = ref([]);
+                const account = ref({});                const positions = ref([]);
                 const orders = ref([]);
                 const history = ref([]);
                 const quote = ref(null);
@@ -453,6 +469,13 @@
                     }
                 };
 
+                const fetchIndices = async () => {
+                    try {
+                        const res = await axios.get('/api/indices');
+                        indices.value = res.data;
+                    } catch (e) { console.error('Indices fetch failed', e); }
+                };
+
                 let pollCount = 0;
                 const fetchData = async () => {
                     try {
@@ -466,6 +489,8 @@
                         positions.value = posRes.data;
                         orders.value = orderRes.data;
                         history.value = historyRes.data;
+                        
+                        fetchIndices();
                         
                         // 每 30 秒更新一次图表 (6 * 5s)
                         pollCount++;
@@ -567,7 +592,7 @@
 
                 return { 
                     accounts, currentAccountId, currentAccount, showAccountModal, editAccount, newAccountName,
-                    account, positions, orders, history, quote, activeTab, tradeForm, cashAmount, timeframe,
+                    indices, account, positions, orders, history, quote, activeTab, tradeForm, cashAmount, timeframe,
                     switchAccount, openAccountModal, saveAccount, deleteAccount,
                     fetchQuote, submitOrder, handleCash, settleT1, resetData, exportData, importData, cancelOrder, cancelAllOrders, formatNum, formatTime, getPnlClass, renderChart
                 };
